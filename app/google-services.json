@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "214330316999",
+    "project_id": "fuckfriendsapp",
+    "storage_bucket": "fuckfriendsapp.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:214330316999:android:6dd5fb62b27e16c58ac6e2",
+        "android_client_info": {
+          "package_name": "org.hornecker.fuckfriends"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyChR9p46eI4rGvBDzi_L2FzuXixW6dc1kU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
