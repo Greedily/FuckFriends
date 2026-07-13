@@ -5,77 +5,75 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.util.Log
 import androidx.activity.ComponentActivity
-import com.google.firebase.firestore.FirebaseFirestore
+import androidx.activity.compose.setContent
+import androidx.compose.runtime.*
+import org.hornecker.fuckfriends.ui.theme.FuckFriendsTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 1. Check: Zugriff auf Nutzungsdaten
-        val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as android.app.usage.UsageStatsManager
-        val startTime = System.currentTimeMillis() - 1000 * 60
-        val stats = usageStatsManager.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY, startTime, System.currentTimeMillis())
-        val hasUsagePermission = stats.isNotEmpty()
+        setContent {
+            FuckFriendsTheme {
+                AppRoot()
+            }
+        }
+    }
 
-        // 2. Check: Über anderen Apps einblenden
+    @Composable
+    private fun AppRoot() {
+        var displayName by remember {
+            mutableStateOf(DeviceIdentity.getDisplayName(this@MainActivity))
+        }
+
+        if (displayName == null) {
+            NameSetupScreen(onNameSet = { name ->
+                displayName = name
+                TimeRequestRepository(this@MainActivity).registerDevice(name)
+                checkPermissionsAndStartService()
+            })
+        } else {
+            LaunchedEffect(Unit) {
+                TimeRequestRepository(this@MainActivity).registerDevice(displayName!!)
+                checkPermissionsAndStartService()
+            }
+            FriendRequestsScreen()
+        }
+    }
+
+    private fun checkPermissionsAndStartService() {
+        // Optimierter Check via AppOpsManager verhindert das Einfrieren des Main-Threads
+        val appOps = getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            appOps.unsafeCheckOpNoThrow(android.app.AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName)
+        } else {
+            @Suppress("DEPRECATION")
+            appOps.checkOpNoThrow(android.app.AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName)
+        }
+        val hasUsagePermission = mode == android.app.AppOpsManager.MODE_ALLOWED
+
         val hasOverlayPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Settings.canDrawOverlays(this)
         } else {
             true
         }
 
-        if (!hasUsagePermission) {
-            val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
-            startActivity(intent)
-        } else if (!hasOverlayPermission) {
-            val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
-            startActivity(intent)
-        } else {
-            // Berechtigungen ok -> Führe zuerst den Firestore-Verbindungstest aus
-            runFirestoreTest()
-
-            // Überwachungsdienst starten
-            val serviceIntent = Intent(this, ScreenTimeService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                startService(serviceIntent)
+        when {
+            !hasUsagePermission -> {
+                startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+            }
+            !hasOverlayPermission -> {
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
+            }
+            else -> {
+                val serviceIntent = Intent(this, ScreenTimeService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
             }
         }
-    }
-
-    private fun runFirestoreTest() {
-        val db = FirebaseFirestore.getInstance()
-        val testData = hashMapOf(
-            "test_key" to "connection_ok",
-            "timestamp" to System.currentTimeMillis()
-        )
-
-        Log.d("FirestoreTest", "Starte Schreibtest...")
-
-        db.collection("connection_test").document("test_doc")
-            .set(testData)
-            .addOnSuccessListener {
-                Log.d("FirestoreTest", "SCHREIBEN ERFOLGREICH! Daten wurden in Firestore gespeichert.")
-
-                // Direkt im Anschluss Lesetest ausführen
-                db.collection("connection_test").document("test_doc")
-                    .get()
-                    .addOnSuccessListener { document ->
-                        if (document != null && document.exists()) {
-                            Log.d("FirestoreTest", "LESEN ERFOLGREICH! Daten aus Cloud: ${document.data}")
-                        } else {
-                            Log.e("FirestoreTest", "LESEN FEHLGESCHLAGEN: Dokument existiert nicht.")
-                        }
-                    }
-                    .addOnFailureListener { e ->
-                        Log.e("FirestoreTest", "LESEN FEHLGESCHLAGEN: ", e)
-                    }
-            }
-            .addOnFailureListener { e ->
-                Log.e("FirestoreTest", "SCHREIBEN FEHLGESCHLAGEN: ", e)
-            }
     }
 }

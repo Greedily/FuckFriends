@@ -6,16 +6,14 @@ plugins {
 
 android {
     namespace = "org.hornecker.fuckfriends"
-    compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
-    }
+
+    // Stabilisiert auf API 35 runtergesetzt, um Inkompatibilitäten bei Samsungs Grafiktreibern zu umgehen
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "org.hornecker.fuckfriends"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
@@ -47,6 +45,10 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+
+    // Coroutines (Wichtig für das asynchrone Tracking im Service!)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

@@ -6,48 +6,114 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
-import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.ListenerRegistration
 import java.util.*
+import kotlinx.coroutines.*
 
 class ScreenTimeService : Service() {
 
-    private val handler = Handler(Looper.getMainLooper())
-    private var limitInMinutes = 30 // Dein Limit. Da du bei 342 bist, schlägt es sofort an.
+    // Coroutine Scope, um schwere Systemabfragen vom Main-Thread fernzuhalten
+    private val serviceJob = SupervisorJob()
+    private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
+
+    private var limitInMinutes = 30 // Tageslimit für Instagram in Minuten
 
     private var windowManager: WindowManager? = null
     private var overlayView: LinearLayout? = null
     private var isOverlayShown = false
 
-    private val checkRunnable = object : Runnable {
-        override fun run() {
-            val currentUsage = getInstagramUsageTime(this@ScreenTimeService)
-            val isInstagramInForeground = isAppInForeground("com.instagram.android")
+    private lateinit var repository: TimeRequestRepository
+    private var myName: String = "Unbekannt"
 
-            // Wir sperren NUR, wenn das Limit voll ist UND Instagram aktiv läuft
-            if (currentUsage >= limitInMinutes && isInstagramInForeground) {
-                showOverlay()
-            } else {
-                hideOverlay()
-            }
-
-            handler.postDelayed(this, 2000) // Alle 2 Sekunden prüfen
-        }
-    }
+    private var currentRequestId: String? = null
+    private var requestListener: ListenerRegistration? = null
+    private var openRequestsListener: ListenerRegistration? = null
+    private val notifiedRequestIds = mutableSetOf<String>()
 
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        repository = TimeRequestRepository(this)
+        myName = DeviceIdentity.getDisplayName(this) ?: "Unbekannt"
         startForegroundServiceNotification()
-        handler.post(checkRunnable)
+
+        // Startet die asynchrone Überwachungsschleife
+        startTrackingLoop()
+
+        listenForFriendsRequests()
+    }
+
+    private fun startTrackingLoop() {
+        serviceScope.launch {
+            while (isActive) {
+                // Diese beiden Aufrufe laufen jetzt sicher auf dem IO-Thread
+                val currentUsage = getInstagramUsageTime(this@ScreenTimeService)
+                val isInstagramInForeground = isAppInForeground("com.instagram.android")
+
+                // UI-Änderungen (Overlay) müssen zwingend zurück auf den Main-Thread
+                withContext(Dispatchers.Main) {
+                    if (currentUsage >= limitInMinutes && isInstagramInForeground) {
+                        showOverlay()
+                    } else {
+                        hideOverlay()
+                    }
+                }
+                delay(2000) // Pausiert die Schleife ressourcenschonend für 2 Sekunden
+            }
+        }
+    }
+
+    private fun listenForFriendsRequests() {
+        openRequestsListener = repository.listenToOpenRequestsFromOthers { requests ->
+            for (request in requests) {
+                if (request.id !in notifiedRequestIds) {
+                    notifiedRequestIds.add(request.id)
+                    showFriendRequestNotification(request)
+                }
+            }
+        }
+    }
+
+    private fun showFriendRequestNotification(request: TimeRequest) {
+        val channelId = "friend_requests_channel"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "Zeit-Anfragen von Freunden",
+                NotificationManager.IMPORTANCE_HIGH
+            )
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
+
+        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = android.app.PendingIntent.getActivity(
+            this,
+            request.id.hashCode(),
+            openAppIntent,
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle("${request.requestedByName} möchte mehr Zeit")
+            .setContentText("${request.requestedMinutes} Minuten mehr – öffne die App zum Antworten")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .build()
+
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(request.id.hashCode(), notification)
     }
 
     private fun showOverlay() {
@@ -76,81 +142,76 @@ class ScreenTimeService : Service() {
         }
 
         val textView = TextView(context).apply {
-            text = "LIMIT ERREICHT!\nDeine 30 Minuten sind um."
+            text = "LIMIT ERREICHT!\nDeine $limitInMinutes Minuten sind um."
             textSize = 24f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
         }
 
         val button = Button(context).apply {
-            text = "Kumpel um 15 Min. anflehen"
+            text = "Freunde um 15 Min. bitten"
             setOnClickListener {
-                sendTimeRequestToFirebase()
-                text = "Anfrage gesendet... Warte auf Antwort"
-                isEnabled = false
+                sendTimeRequest(this)
             }
         }
 
         layout.addView(textView)
-        layout.addView(TextView(context).apply { height = 50 }) // Abstand
+        layout.addView(TextView(context).apply { height = 50 })
         layout.addView(button)
 
         overlayView = layout
-
-        Handler(Looper.getMainLooper()).post {
-            windowManager?.addView(layout, params)
-            isOverlayShown = true
-        }
+        windowManager?.addView(layout, params)
+        isOverlayShown = true
     }
 
     private fun hideOverlay() {
         if (!isOverlayShown) return
-        Handler(Looper.getMainLooper()).post {
-            overlayView?.let {
-                windowManager?.removeView(it)
-                overlayView = null
-                isOverlayShown = false
-            }
+        overlayView?.let {
+            windowManager?.removeView(it)
+            overlayView = null
+            isOverlayShown = false
         }
+        requestListener?.remove()
+        requestListener = null
+        currentRequestId = null
     }
 
-    private fun sendTimeRequestToFirebase() {
-        val db = FirebaseFirestore.getInstance()
+    private fun sendTimeRequest(button: Button) {
+        if (currentRequestId != null) return
 
-        val request = hashMapOf(
-            "user" to "Eike",
-            "status" to "pending",
-            "requestedMinutes" to 15,
-            "timestamp" to System.currentTimeMillis()
+        button.isEnabled = false
+        button.text = "Anfrage wird gesendet..."
+
+        repository.createRequest(
+            displayName = myName,
+            requestedMinutes = 15,
+            onSuccess = { requestId ->
+                currentRequestId = requestId
+                button.text = "Anfrage gesendet... Warte auf Antwort"
+                listenForApproval(requestId, button)
+            },
+            onFailure = {
+                button.isEnabled = true
+                button.text = "Fehler – nochmal versuchen"
+            }
         )
-
-        // Schreibt die Anfrage in die Firebase-Cloud
-        db.collection("time_requests").document("anfrage_eike")
-            .set(request)
-            .addOnSuccessListener {
-                println("Firebase: Anfrage hochgeladen!")
-                listenForApproval()
-            }
-            .addOnFailureListener { e ->
-                println("Firebase Fehler: ${e.message}")
-            }
     }
 
-    private fun listenForApproval() {
-        val db = FirebaseFirestore.getInstance()
-
-        // Hört live zu, ob sich der Status in der Cloud ändert
-        db.collection("time_requests").document("anfrage_eike")
-            .addSnapshotListener { snapshot, e ->
-                if (snapshot != null && snapshot.exists()) {
-                    val status = snapshot.getString("status")
-                    if (status == "approved") {
-                        limitInMinutes += 15 // Limit erhöhen
-                        hideOverlay() // Sperre entfernen
-                        println("Firebase: Freiheit gegönnt!")
-                    }
+    private fun listenForApproval(requestId: String, button: Button) {
+        requestListener?.remove()
+        requestListener = repository.listenToRequest(requestId) { status ->
+            when (status) {
+                "approved" -> {
+                    limitInMinutes += 15
+                    hideOverlay()
+                }
+                "denied" -> {
+                    button.isEnabled = true
+                    button.text = "Abgelehnt – nochmal fragen?"
+                    currentRequestId = null
                 }
             }
+        }
     }
 
     private fun isAppInForeground(packageName: String): Boolean {
@@ -173,7 +234,9 @@ class ScreenTimeService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        handler.removeCallbacks(checkRunnable)
+        serviceJob.cancel() // Beendet alle Coroutines sofort, um Leaks zu verhindern
+        requestListener?.remove()
+        openRequestsListener?.remove()
         hideOverlay()
         super.onDestroy()
     }
